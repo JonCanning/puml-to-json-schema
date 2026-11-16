@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/Library",
+  "$defs": {
+    "Book": {
+      "type": "object",
+      "properties": {
+        "isbn": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "pageCount": {
+          "type": "integer"
+        },
+        "replacementCost": {
+          "type": "number"
+        },
+        "publishedOn": {
+          "type": "string",
+          "format": "date"
+        },
+        "loans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Loan"
+          }
+        }
+      }
+    },
+    "Fine": {
+      "type": "object",
+      "properties": {
+        "fineId": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "number"
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "paid": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "Library": {
+      "type": "object",
+      "properties": {
+        "libraryId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "openedOn": {
+          "type": "string",
+          "format": "date"
+        },
+        "isOpen": {
+          "type": "boolean"
+        },
+        "shelves": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Shelf"
+          }
+        },
+        "books": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Book"
+          }
+        }
+      }
+    },
+    "Loan": {
+      "type": "object",
+      "properties": {
+        "loanId": {
+          "type": "string"
+        },
+        "memberId": {
+          "type": "string"
+        },
+        "isbn": {
+          "type": "string"
+        },
+        "borrowedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "dueAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "returnedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "renewable": {
+          "type": "boolean"
+        },
+        "fine": {
+          "$ref": "#/$defs/Fine"
+        }
+      },
+      "required": [
+        "fine"
+      ]
+    },
+    "Member": {
+      "type": "object",
+      "properties": {
+        "memberId": {
+          "type": "string"
+        },
+        "fullName": {
+          "type": "string"
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "outstandingFees": {
+          "type": "number"
+        },
+        "loans": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Loan"
+          }
+        }
+      }
+    },
+    "Shelf": {
+      "type": "object",
+      "properties": {
+        "shelfCode": {
+          "type": "string"
+        },
+        "floor": {
+          "type": "integer"
+        },
+        "capacity": {
+          "type": "integer"
+        },
+        "books": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Book"
+          }
+        }
+      }
+    }
+  }
+}

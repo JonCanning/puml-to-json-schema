@@ -1,0 +1,9 @@
+@startuml
+class LOAN {
+  dueAt : datetime
+}
+
+class LOAN {
+  renewable : boolean
+}
+@enduml

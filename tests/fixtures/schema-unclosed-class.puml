@@ -1,0 +1,4 @@
+@startuml
+class LOAN {
+  dueAt : datetime
+@enduml

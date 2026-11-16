@@ -1,0 +1,4 @@
+class LOAN {
+  dueAt : datetime
+}
+@enduml

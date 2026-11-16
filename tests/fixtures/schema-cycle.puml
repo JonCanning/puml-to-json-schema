@@ -1,0 +1,10 @@
+@startuml
+class LOAN {
+  renewable : boolean
+}
+class FINE {
+  amount : decimal
+}
+LOAN ||--o| FINE : incurs
+FINE ||--o| LOAN : back
+@enduml

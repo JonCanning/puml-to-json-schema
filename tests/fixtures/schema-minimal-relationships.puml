@@ -1,0 +1,13 @@
+@startuml
+class LIBRARY {
+  libraryId : string
+}
+class SHELF {
+  shelfCode : string
+}
+class BOOK {
+  isbn : string
+}
+LIBRARY ||--o{ SHELF : has
+LIBRARY ||--o| BOOK : holds
+@enduml

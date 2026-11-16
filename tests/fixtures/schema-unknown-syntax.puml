@@ -1,0 +1,5 @@
+@startuml
+class LOAN {
+  note left of LOAN : hi
+}
+@enduml

@@ -1,0 +1,11 @@
+@startuml
+class LOAN <<Core>> {
+  * loanId : string <<PK>>
+  dueAt : datetime
+}
+class FINE <<Core>> {
+  * fineId : string <<PK>>
+  amount : decimal
+}
+LOAN ||--|| FINE : incurs
+@enduml

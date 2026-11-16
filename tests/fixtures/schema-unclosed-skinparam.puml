@@ -1,0 +1,4 @@
+@startuml
+skinparam class {
+  BackgroundColor #FFFFFF
+@enduml

@@ -1,0 +1,77 @@
+@startuml
+' Library lending model - fictional data used by the tests
+
+left to right direction
+hide methods
+hide stereotypes
+skinparam linetype ortho
+skinparam shadowing false
+skinparam dpi 120
+
+skinparam class {
+  BackgroundColor #F8FAFC
+  BorderColor #334155
+}
+
+skinparam class<<Core>> {
+  BackgroundColor #DBEAFE
+  BorderColor #1D4ED8
+}
+
+class LIBRARY <<Core>> {
+  * libraryId : string <<PK>>
+  --
+  name : string
+  openedOn : date
+  isOpen : boolean
+}
+
+class MEMBER <<Core>> {
+  * memberId : string <<PK>>
+  fullName : string
+  joinedAt : datetime
+  active : boolean
+  outstandingFees : decimal
+}
+
+class BOOK {
+  * isbn : string <<PK>>
+  title : string
+  pageCount : integer
+  replacementCost : decimal
+  publishedOn : date
+}
+
+class SHELF {
+  * shelfCode : string <<PK>>
+  floor : integer
+  capacity : integer
+}
+
+class LOAN {
+  * loanId : string <<PK>>
+  memberId : string <<FK>>
+  isbn : string <<FK>>
+  borrowedAt : datetime
+  dueAt : datetime
+  returnedAt : datetime
+  renewable : boolean
+}
+
+class FINE {
+  * fineId : string <<PK>>
+  amount : decimal
+  issuedAt : datetime
+  paid : boolean
+  reason : string
+}
+
+' Relationships
+LIBRARY ||--o{ SHELF : has
+LIBRARY ||--o{ BOOK : holds
+SHELF ||--o{ BOOK : stores
+MEMBER ||--o{ LOAN : takes
+BOOK ||--o{ LOAN : appears in
+LOAN ||--|| FINE : incurs
+
+@enduml
