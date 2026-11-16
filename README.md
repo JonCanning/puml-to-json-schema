@@ -30,36 +30,6 @@ The top level holds `$schema`, a `$ref` to the root entity, and `$defs`. `$defs`
 holds one entry per model class, sorted by name. Every entry is an object whose
 properties follow the attribute order in the model.
 
-The excerpt below is condensed. The real file indents by two spaces and puts
-each keyword on its own line.
-
-```json
-{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$ref": "#/$defs/Library",
-  "$defs": {
-    "Library": {
-      "type": "object",
-      "properties": {
-        "libraryId": { "type": "string" },
-        "openedOn": { "type": "string", "format": "date" },
-        "isOpen": { "type": "boolean" },
-        "shelves": { "type": "array", "items": { "$ref": "#/$defs/Shelf" } },
-        "books": { "type": "array", "items": { "$ref": "#/$defs/Book" } }
-      }
-    },
-    "Loan": {
-      "type": "object",
-      "properties": {
-        "borrowedAt": { "type": "string", "format": "date-time" },
-        "fine": { "$ref": "#/$defs/Fine" }
-      },
-      "required": ["fine"]
-    }
-  }
-}
-```
-
 A relationship that ends in `o{` becomes an array of `$ref`. A relationship that
 ends in `o|` or `||` becomes a single `$ref`. A property appears in `required`
 only when both ends of the relationship are `||`, so `required` lists the
@@ -80,6 +50,237 @@ The document contains no other keywords. There is no `pattern`, `enum`,
 `minLength`, `default`, `description`, or `additionalProperties`. The emitted
 keywords are `$schema`, `$ref`, `$defs`, `type`, `properties`, `items`,
 `format`, and `required`.
+
+## Examples
+
+Each example below is a complete model. Save the input, run the command, and you
+get the output shown.
+
+### One to many
+
+A library holds many books. The relationship ends in `o{`, so `Library` gets an
+array of references.
+
+```plantuml
+@startuml
+class LIBRARY {
+  * libraryId : string <<PK>>
+  name : string
+}
+class BOOK {
+  * isbn : string <<PK>>
+  title : string
+}
+LIBRARY ||--o{ BOOK : holds
+@enduml
+```
+
+```powershell
+python puml_to_json_schema.py one-to-many.puml --output one-to-many.json
+```
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/Library",
+  "$defs": {
+    "Book": {
+      "type": "object",
+      "properties": {
+        "isbn": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "Library": {
+      "type": "object",
+      "properties": {
+        "libraryId": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "books": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Book"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### One to one, and `required`
+
+Both ends of `LOAN ||--|| FINE` are `||`, so `Loan` gets a single reference and
+the property name is added to `required`.
+
+```plantuml
+@startuml
+class LIBRARY {
+  * libraryId : string <<PK>>
+}
+class LOAN {
+  * loanId : string <<PK>>
+  dueAt : datetime
+}
+class FINE {
+  * fineId : string <<PK>>
+  amount : decimal
+}
+LOAN ||--|| FINE : incurs
+@enduml
+```
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/Library",
+  "$defs": {
+    "Fine": {
+      "type": "object",
+      "properties": {
+        "fineId": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "number"
+        }
+      }
+    },
+    "Library": {
+      "type": "object",
+      "properties": {
+        "libraryId": {
+          "type": "string"
+        }
+      }
+    },
+    "Loan": {
+      "type": "object",
+      "properties": {
+        "loanId": {
+          "type": "string"
+        },
+        "dueAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "fine": {
+          "$ref": "#/$defs/Fine"
+        }
+      },
+      "required": [
+        "fine"
+      ]
+    }
+  }
+}
+```
+
+`LIBRARY` takes no part in the relationship. It is declared so the top-level
+`$ref` resolves, because the generator always points the document at the entity
+named by `ROOT_ENTITY`.
+
+### Many to many through an intersecting class
+
+The generator emits one property per declared relationship, so a many-to-many is
+modelled with a class in the middle and two one-to-many relationships.
+
+```plantuml
+@startuml
+class LIBRARY {
+  * libraryId : string <<PK>>
+}
+class MEMBER {
+  * memberId : string <<PK>>
+  fullName : string
+}
+class BOOK {
+  * isbn : string <<PK>>
+  title : string
+}
+class LOAN {
+  * loanId : string <<PK>>
+  memberId : string <<FK>>
+  isbn : string <<FK>>
+  borrowedAt : datetime
+}
+MEMBER ||--o{ LOAN : takes
+BOOK ||--o{ LOAN : appears in
+@enduml
+```
+
+The `$defs` entries below are what this model produces. The `Library` entry is
+left out to keep the example short.
+
+```json
+{
+  "Book": {
+    "type": "object",
+    "properties": {
+      "isbn": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string"
+      },
+      "loans": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/Loan"
+        }
+      }
+    }
+  },
+  "Loan": {
+    "type": "object",
+    "properties": {
+      "loanId": {
+        "type": "string"
+      },
+      "memberId": {
+        "type": "string"
+      },
+      "isbn": {
+        "type": "string"
+      },
+      "borrowedAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    }
+  },
+  "Member": {
+    "type": "object",
+    "properties": {
+      "memberId": {
+        "type": "string"
+      },
+      "fullName": {
+        "type": "string"
+      },
+      "loans": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/Loan"
+        }
+      }
+    }
+  }
+}
+```
+
+`Member` and `Book` each carry a `loans` array, so both directions of the
+many-to-many are navigable. `Loan` holds `memberId` and `isbn` as plain string
+properties, because the generator emits the reference on the parent side of each
+relationship. The intersecting class carries the foreign keys itself.
 
 ## The supported PlantUML subset
 
@@ -107,6 +308,10 @@ parent and child pair to the property name that carries the reference.
 A class or relationship without an entry is an error. The message names the
 class, or the parent and child pair, and reports the line where it was declared.
 This keeps a new class from slipping into the output under a guessed name.
+
+The generator emits a property only on the parent side of a relationship. A
+navigable reverse direction needs its own declared relationship and its own
+table entry.
 
 `ROOT_ENTITY` names the entity that the top-level `$ref` points at. Change it
 when a different class becomes the entry point.
