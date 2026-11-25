@@ -5,8 +5,11 @@ The PlantUML model is the input. An optional JSON configuration file supplies
 the root class and explicit entity and relationship names. The generator parses
 the small subset of PlantUML that the example model uses and emits a draft
 2020-12 schema that describes the shape of the root entity. A ``<<PK>>`` stays a
-plain property. Every ``<<FK>>`` is dropped, because the document expresses the
-link by containment; an FK that containment cannot carry is an error. It
+plain property and a ``<<SK>>`` is dropped, because a nested document identifies
+children by position rather than by a row key; a root that declares only
+``<<SK>>`` keys is an error. Every ``<<FK>>`` is dropped too,
+because the document expresses the link by containment; an FK that containment
+cannot carry is an error. It
 deliberately emits no validation keywords: value constraints belong to the API
 layer.
 """
@@ -58,7 +61,7 @@ RELATIONSHIP_NAMES = {
 }
 
 CARDINALITIES = {"||", "o|", "o{"}
-ATTRIBUTE_MARKERS = {"PK", "FK"}
+ATTRIBUTE_MARKERS = {"PK", "SK", "FK"}
 IGNORED_LINES = {"left to right direction", "hide methods", "hide stereotypes"}
 
 CLASS_PATTERN = re.compile(
@@ -338,19 +341,36 @@ def _check_containment_cycles(
 
 
 def _check_foreign_keys(model: Model, root: str | None) -> None:
-    """Reject a foreign key the document cannot carry.
+    """Reject a marker the document cannot honour.
 
-    Every ``<<FK>>`` is dropped from the document, so the link has to survive as
-    containment. It does only when exactly one class declares a ``<<PK>>`` with
-    the same name and that class sits above the declaring class on a path from
-    the root. Anything else would lose the link, so it is an error rather than
-    a silent deletion.
+    Every ``<<FK>>`` and ``<<SK>>`` is dropped from the document, so an FK has
+    to survive as containment. It does only when exactly one class declares a
+    key with the same name and that class sits above the declaring class on a
+    path from the root. A key is a ``<<PK>>`` or an ``<<SK>>``.
+
+    A root that declares only ``<<SK>>`` keys would lose every identifier it
+    names, so the generator rejects it. A root with a ``<<PK>>`` keeps that
+    property and drops any sibling ``<<SK>>``. Anything else would lose
+    information, so it is an error rather than a silent deletion.
     """
-    pk_owners: dict[str, list[str]] = {}
+    if root is not None and root in model.classes:
+        root_attributes = model.classes[root].attributes
+        if not any(attribute.marker == "PK" for attribute in root_attributes):
+            for attribute in root_attributes:
+                if attribute.marker == "SK":
+                    raise PumlError(
+                        f"attribute '{attribute.name}' in class '{root}' is "
+                        f"<<SK>>, but '{root}' declares no <<PK>>, so the "
+                        "document would have no identifier; mark one key "
+                        "<<PK>>",
+                        attribute.line,
+                    )
+
+    key_owners: dict[str, list[str]] = {}
     for definition in model.classes.values():
         for attribute in definition.attributes:
-            if attribute.marker == "PK":
-                pk_owners.setdefault(attribute.name, []).append(definition.name)
+            if attribute.marker in {"PK", "SK"}:
+                key_owners.setdefault(attribute.name, []).append(definition.name)
 
     ancestors = _containment_ancestors(model, root)
     root_name = root or "(none)"
@@ -363,20 +383,20 @@ def _check_foreign_keys(model: Model, root: str | None) -> None:
                 f"attribute '{attribute.name}' in class '{definition.name}' "
                 "is <<FK>>"
             )
-            owners = pk_owners.get(attribute.name, [])
+            owners = key_owners.get(attribute.name, [])
             if not owners:
                 raise PumlError(
-                    f"{where}, but no class declares <<PK>> '{attribute.name}'; "
-                    "rename it to match the primary key it points at",
+                    f"{where}, but no class declares a key named "
+                    f"'{attribute.name}'; rename it to match the <<PK>> or "
+                    "<<SK>> it points at",
                     attribute.line,
                 )
             if len(owners) > 1:
                 names = sorted(owners)
                 listed = ", ".join(names[:-1]) + f" and {names[-1]}"
                 raise PumlError(
-                    f"{where}, but classes {listed} declare "
-                    f"<<PK>> '{attribute.name}'; give the keys "
-                    "distinct names",
+                    f"{where}, but classes {listed} declare a key named "
+                    f"'{attribute.name}'; give the keys distinct names",
                     attribute.line,
                 )
             if definition.name not in ancestors:
@@ -467,7 +487,7 @@ def build_schema(model: Model, config: Config | None = None) -> dict:
         properties: dict[str, dict] = {}
         origins: dict[str, str] = {}
         for attribute in definition.attributes:
-            if attribute.marker == "FK":
+            if attribute.marker in {"FK", "SK"}:
                 continue
             property_name = _lower_first(attribute.name)
             origins[property_name] = f"attribute '{attribute.name}'"

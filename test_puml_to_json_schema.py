@@ -114,6 +114,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(relationship.left_card, "||")
         self.assertEqual(relationship.right_card, "||")
 
+    def test_parses_surrogate_key_marker(self):
+        model = parse_text(
+            "@startuml\n"
+            "class CLAIM {\n"
+            "  * caseId : string <<SK>>\n"
+            "}\n"
+            "@enduml\n"
+        )
+
+        self.assertEqual(model.classes["CLAIM"].attributes[0].marker, "SK")
+
     def test_accepts_styling_directives_from_supplied_model(self):
         model = parse_text(MODEL_PATH.read_text(encoding="utf-8"))
 
@@ -788,7 +799,9 @@ class ForeignKeyTests(unittest.TestCase):
         with self.assertRaises(generator.PumlError) as caught:
             schema_for(text)
 
-        self.assertIn("classes A and B declare <<PK>> 'ref'", str(caught.exception))
+        self.assertIn(
+            "classes A and B declare a key named 'ref'", str(caught.exception)
+        )
 
     def test_fk_with_no_matching_pk_is_an_error(self):
         text = (
@@ -803,7 +816,9 @@ class ForeignKeyTests(unittest.TestCase):
         with self.assertRaises(generator.PumlError) as caught:
             schema_for(text)
 
-        self.assertIn("no class declares <<PK>> 'memberId'", str(caught.exception))
+        self.assertIn(
+            "no class declares a key named 'memberId'", str(caught.exception)
+        )
 
     def test_fk_in_a_class_outside_the_root_tree_is_an_error(self):
         text = (
@@ -872,6 +887,127 @@ class ForeignKeyTests(unittest.TestCase):
         self.assertNotIn("isbn", loan)
         self.assertNotIn("memberId", loan)
         self.assertEqual(loan["loanId"], {"type": "string"})
+
+
+class SurrogateKeyTests(unittest.TestCase):
+    """An ``<<SK>>`` names a key containment makes redundant, so it is dropped."""
+
+    def test_sk_is_dropped_and_pk_is_kept(self):
+        text = (
+            "@startuml\n"
+            "class PORTFOLIO {\n"
+            "  * portfolioId : string <<PK>>\n"
+            "}\n"
+            "class CLAIM {\n"
+            "  * claimNumber : string <<PK>>\n"
+            "  * caseId : string <<SK>>\n"
+            "  policyNumber : string\n"
+            "}\n"
+            "PORTFOLIO ||--o{ CLAIM : claims\n"
+            "@enduml\n"
+        )
+
+        properties = schema_for(text)["$defs"]["Claim"]["properties"]
+
+        self.assertEqual(set(properties), {"claimNumber", "policyNumber"})
+
+    def test_fk_resolves_to_a_surrogate_key(self):
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  * libraryId : string <<PK>>\n}\n"
+            "class SHELF {\n  * shelfCode : string <<SK>>\n}\n"
+            "class BOOK {\n"
+            "  * isbn : string <<PK>>\n"
+            "  shelfCode : string <<FK>>\n"
+            "}\n"
+            "LIBRARY ||--o{ SHELF : shelves\n"
+            "SHELF ||--o{ BOOK : books\n"
+            "@enduml\n"
+        )
+
+        definitions = schema_for(text)["$defs"]
+
+        self.assertEqual(set(definitions["Book"]["properties"]), {"isbn"})
+        self.assertEqual(set(definitions["Shelf"]["properties"]), {"books"})
+
+    def test_sk_beside_a_root_pk_is_dropped(self):
+        text = (
+            "@startuml\n"
+            "class CLAIM {\n"
+            "  * claimNumber : string <<PK>>\n"
+            "  * caseId : string <<SK>>\n"
+            "}\n"
+            "@enduml\n"
+        )
+
+        properties = schema_for(text)["$defs"]["Claim"]["properties"]
+
+        self.assertEqual(set(properties), {"claimNumber"})
+
+    def test_sk_is_dropped_from_an_unreachable_class(self):
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class ORPHAN {\n"
+            "  * oId : string <<SK>>\n"
+            "  note : string\n"
+            "}\n"
+            "@enduml\n"
+        )
+
+        properties = schema_for(text)["$defs"]["Orphan"]["properties"]
+
+        self.assertEqual(set(properties), {"note"})
+
+    def test_pk_and_sk_with_the_same_name_are_ambiguous(self):
+        text = (
+            "@startuml\n"
+            "class A {\n  * ref : string <<PK>>\n}\n"
+            "class B {\n  * ref : string <<SK>>\n}\n"
+            "class C {\n  * cId : string <<PK>>\n  ref : string <<FK>>\n}\n"
+            "A ||--o{ B : bs\n"
+            "B ||--o{ C : cs\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
+
+        self.assertIn(
+            "classes A and B declare a key named 'ref'", str(caught.exception)
+        )
+
+    def test_sk_only_root_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class CLAIM {\n"
+            "  * caseId : string <<SK>>\n"
+            "  policyNumber : string\n"
+            "}\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
+
+        message = str(caught.exception)
+        self.assertEqual(caught.exception.line, 3)
+        self.assertIn("attribute 'caseId' in class 'CLAIM' is <<SK>>", message)
+        self.assertIn("'CLAIM' declares no <<PK>>", message)
+
+    def test_sk_only_root_selected_by_config_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class CLAIM {\n  * caseId : string <<SK>>\n}\n"
+            "A ||--o{ CLAIM : claims\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(generator.PumlError) as caught:
+            build_schema(parse_text(text), generator.Config(root_entity="CLAIM"))
+
+        self.assertIn("'CLAIM' declares no <<PK>>", str(caught.exception))
 
 
 class FullModelTests(unittest.TestCase):

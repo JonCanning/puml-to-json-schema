@@ -4,10 +4,12 @@
 2020-12 JSON Schema that describes the shape of the root entity. The PlantUML
 model is the input; an optional JSON configuration file overrides the root class
 and the generated names. The generator emits structure only: property names,
-property types, and which relationships are required. A primary-key attribute
-stays a plain property. Every foreign-key attribute is dropped, because the
-document carries those links by containment. The generator emits no value
-constraints, because those belong to the layer that consumes the schema.
+property types, and which relationships are required. The generator keeps a
+`<<PK>>` attribute as a plain property. It drops a `<<SK>>` attribute, because a
+nested document identifies its children by position rather than by a row key.
+It drops every foreign-key attribute, because the document carries those links
+by containment. The generator emits no value constraints, because those belong
+to the layer that consumes the schema.
 
 `example-model.puml` is a fictional library-lending model. It exists so the
 tests and the golden fixture carry no real data.
@@ -96,17 +98,43 @@ ends in `o|` or `||` becomes a single `$ref`. A property appears in `required`
 only when both ends of the relationship are `||`, so `required` lists the
 relationships the model marks as mandatory and nothing else.
 
+### Keys
+
+A `<<PK>>` names a key that belongs in the payload. The generator keeps it as a
+plain property. A `<<SK>>` names a surrogate key that containment makes
+redundant. The parent's array position already identifies the child, so a
+generated row key adds nothing, and the generator drops it.
+
+```plantuml
+@startuml
+class CLAIM {
+  * claimNumber : string <<PK>>
+  * caseId : string <<SK>>
+  policyNumber : string
+}
+@enduml
+```
+
+The schema keeps `claimNumber` and `policyNumber` and drops `caseId`.
+
+A root class that marks only `<<SK>>` keys is an error. The document would carry
+no identifier, so the generator stops. A root that declares a `<<PK>>` keeps it
+and drops any sibling `<<SK>>`.
+
+`<<SK>>` names do not take part in property-collision checks, because the
+generator never emits them.
+
 ### Foreign keys
 
 Every `<<FK>>` attribute is dropped. Containment carries the link instead, so an
 FK column would repeat what the nesting already says.
 
-The generator resolves an FK by name: the target is the one class whose `<<PK>>`
-has the same name. That class must sit above the declaring class on some
-containment path from the root.
+The generator resolves an FK by name. The target is the one class whose key has
+the same name, whether that key is a `<<PK>>` or an `<<SK>>`. That class must sit
+above the declaring class on some containment path from the root.
 
 An FK that fails this test is an error, not a silent deletion. Four cases are
-errors. The first is a name with no matching `<<PK>>`. The second is a name
+errors. The first is a name with no matching key. The second is a name
 several classes claim. The third is a holder outside the root's containment
 tree. The fourth is a target that is a sibling or a child. The message names the
 attribute, the target and the fix, and carries the attribute's line number.
@@ -381,7 +409,7 @@ The parser accepts the following and rejects everything else with a line number:
 - the styling lines `left to right direction`, `hide methods`, and `hide stereotypes`
 - `skinparam` lines, and `skinparam` blocks closed with `}`
 - `class NAME {` or `class NAME <<Stereotype>> {`, followed by one attribute per line and a closing `}`
-- attributes of the form `name : type`, with an optional leading `*` and an optional `<<PK>>` or `<<FK>>` marker
+- attributes of the form `name : type`, with an optional leading `*` and an optional `<<PK>>`, `<<SK>>`, or `<<FK>>` marker
 - relationships of the form `PARENT ||--o{ CHILD : label`, where each cardinality is `||`, `o|`, or `o{`
 
 A class body must span several lines. `class LOAN { loanId : string }` on one
@@ -411,11 +439,11 @@ override entry.
 `root_entity` selects the entity that the top-level `$ref` points at, so
 changing the entry point needs no constant edit.
 
-`PK` and `FK` markers do not change a property's schema on their own. The
-generator drops every `<<FK>>`, because containment carries the link. An FK that
+`PK`, `SK`, and `FK` markers select which attributes reach the schema. The
+generator keeps a `<<PK>>`, drops an `<<SK>>` because containment identifies the
+child, and drops every `<<FK>>` because containment carries the link. An FK that
 no containment path can carry stops the run, as described in
-[Foreign keys](#foreign-keys). A `<<PK>>` stays a plain property, and neither
-marker affects `required`.
+[Foreign keys](#foreign-keys). None of the three markers affects `required`.
 
 ## Command line contract
 
