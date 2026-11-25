@@ -4,7 +4,9 @@
 2020-12 JSON Schema that describes the shape of the root entity. The PlantUML
 model is the input; an optional JSON configuration file overrides the root class
 and the generated names. The generator emits structure only: property names,
-property types, and which relationships are required. It emits no value
+property types, and which relationships are required. A primary-key attribute
+stays a plain property. Every foreign-key attribute is dropped, because the
+document carries those links by containment. The generator emits no value
 constraints, because those belong to the layer that consumes the schema.
 
 `example-model.puml` is a fictional library-lending model. It exists so the
@@ -32,7 +34,6 @@ overrides generated entity and property names:
 
 ```json
 {
-  "root_entity": "MEMBER",
   "entity_names": {
     "MEMBER": "Borrower",
     "BOOK": "Tome"
@@ -49,7 +50,7 @@ overrides generated entity and property names:
 python puml_to_json_schema.py example-model.puml --output generated/borrower.schema.json --config borrower-config.json
 ```
 
-The top-level `$ref` becomes `#/$defs/Borrower`. `Member` becomes `Borrower`
+The top-level `$ref` stays `#/$defs/Library`. `Member` becomes `Borrower`
 everywhere, including the `$defs` key. `Book` becomes `Tome`, including inside
 each `$ref` that points at it. `Member.loans` becomes `Borrower.activeLoans`.
 
@@ -58,7 +59,8 @@ All three keys are optional:
 - `root_entity` names the class whose entity the top-level `$ref` points at. It
   may also name an entity. When omitted, `LIBRARY` is the root if the model
   declares it. Otherwise the root is the first class declared with no incoming
-  relationship.
+  relationship. The root must sit above every `<<FK>>` target. Otherwise
+  generation fails; see [Foreign keys](#foreign-keys).
 - `entity_names` maps a class name to the name used in `$defs`.
 - `relationship_names` maps a parent class and child class to the property name
   that carries the reference. It uses both class names as the key, because one
@@ -96,20 +98,28 @@ relationships the model marks as mandatory and nothing else.
 
 ### Foreign keys
 
-An `<<FK>>` attribute disappears when containment already carries the
-relationship. The generator treats the FK target as the one class whose `<<PK>>`
-has the same attribute name. It drops the attribute when that class sits above
-the declaring class on every containment path from the root.
+Every `<<FK>>` attribute is dropped. Containment carries the link instead, so an
+FK column would repeat what the nesting already says.
 
-The attribute stays a plain property whenever the rule cannot prove redundancy.
-That covers a sibling reference, a target above only on another path of a shared
-definition, an ambiguous target, and an attribute with no matching `<<PK>>`.
-Keeping it is deliberate, because dropping it would lose the link. A misspelled
-FK name therefore keeps the property.
+The generator resolves an FK by name: the target is the one class whose `<<PK>>`
+has the same name. That class must sit above the declaring class on some
+containment path from the root.
 
-In `example-model.puml` the root is `Library`. `Book` is above `Loan` on every
-path, so `Loan.isbn` is dropped. `Member` is outside that containment tree, so
-`Loan.memberId` stays.
+An FK that fails this test is an error, not a silent deletion. Four cases are
+errors. The first is a name with no matching `<<PK>>`. The second is a name
+several classes claim. The third is a holder outside the root's containment
+tree. The fourth is a target that is a sibling or a child. The message names the
+attribute, the target and the fix, and carries the attribute's line number.
+
+Because the link has to survive as nesting, the root must sit above every FK
+target. A root below one makes that key unreachable, so the example model fails
+with `root_entity` set to `MEMBER` or `LOAN`.
+
+In `example-model.puml` the root is `Library`, and `Book` and `Member` both sit
+above `Loan`. Both FK columns are dropped. `Loan` is reachable through either
+parent. A loan nested under `Book` loses the member link. A loan nested under
+`Member` loses the book link. See
+[Known limitations](#known-limitations) for the escape hatch.
 
 The containment tree starts at the root described in
 [Configure the model mappings](#configure-the-model-mappings): `LIBRARY` when
@@ -294,6 +304,8 @@ class LOAN {
   isbn : string <<FK>>
   borrowedAt : datetime
 }
+LIBRARY ||--o{ MEMBER : members
+LIBRARY ||--o{ BOOK : holds
 MEMBER ||--o{ LOAN : takes
 BOOK ||--o{ LOAN : appears in
 @enduml
@@ -327,12 +339,6 @@ left out to keep the example short.
       "loanId": {
         "type": "string"
       },
-      "memberId": {
-        "type": "string"
-      },
-      "isbn": {
-        "type": "string"
-      },
       "borrowedAt": {
         "type": "string",
         "format": "date-time"
@@ -360,10 +366,11 @@ left out to keep the example short.
 ```
 
 `Member` and `Book` each carry a `loans` array, so both directions of the
-many-to-many are navigable. `Loan` holds `memberId` and `isbn` as plain string
-properties, because the generator emits the reference on the parent side of each
-relationship. The intersecting class carries the foreign keys itself. Neither
-target is above `Loan` in this model, so the FK rule keeps both.
+many-to-many are navigable. `Loan` holds neither `memberId` nor `isbn`. Both
+targets sit above `Loan`, so containment carries both links and the generator
+drops both columns. The `LIBRARY` relationships put `Member` and `Book` inside
+the root's containment tree; without them an FK that points at either class is
+an error.
 
 ## The supported PlantUML subset
 
@@ -404,10 +411,11 @@ override entry.
 `root_entity` selects the entity that the top-level `$ref` points at, so
 changing the entry point needs no constant edit.
 
-`PK` and `FK` markers do not change a property's schema on their own. A
-`<<FK>>` that points at an entity above the holder on every containment path is
-dropped, as described in [Foreign keys](#foreign-keys). A `<<PK>>` stays a plain
-property, and neither marker affects `required`.
+`PK` and `FK` markers do not change a property's schema on their own. The
+generator drops every `<<FK>>`, because containment carries the link. An FK that
+no containment path can carry stops the run, as described in
+[Foreign keys](#foreign-keys). A `<<PK>>` stays a plain property, and neither
+marker affects `required`.
 
 ## Command line contract
 
@@ -440,7 +448,7 @@ which would otherwise break the byte comparison on Windows.
 python -m unittest -v
 ```
 
-The suite runs 96 tests. It covers the parser errors, the emission shapes, and
+The suite runs 99 tests. It covers the parser errors, the emission shapes, and
 the example model against the golden fixture. It also covers the configuration
 overrides and their errors, the foreign-key rule, the command line contract, and
 determinism.
@@ -460,5 +468,6 @@ test_puml_to_json_schema.py        the tests
 
 These are defects in the current generator rather than intended behaviour:
 
-- A left-hand `o{` is validated and then ignored, so write relationships from the parent to the child.
+- A left-hand `o{` is validated and then ignored. Write relationships from the parent to the child. A child-first relationship leaves no containment path, so any FK the child declares is reported as an error.
+- A class reachable by two paths keeps the FK link only on the paths where its target sits above it. To keep such a column, declare the attribute without the `<<FK>>` marker; the generator then copies it as a plain property.
 - An output path that is a hardlink to the input is not recognised as the same file, so the input is overwritten.

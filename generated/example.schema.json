@@ -66,6 +66,12 @@
         "isOpen": {
           "type": "boolean"
         },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Member"
+          }
+        },
         "shelves": {
           "type": "array",
           "items": {
@@ -84,9 +90,6 @@
       "type": "object",
       "properties": {
         "loanId": {
-          "type": "string"
-        },
-        "memberId": {
           "type": "string"
         },
         "borrowedAt": {

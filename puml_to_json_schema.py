@@ -4,9 +4,11 @@
 The PlantUML model is the input. An optional JSON configuration file supplies
 the root class and explicit entity and relationship names. The generator parses
 the small subset of PlantUML that the example model uses and emits a draft
-2020-12 schema that describes the shape of the root entity. Foreign keys that
-containment already expresses are omitted. It deliberately emits no validation
-keywords: value constraints belong to the API layer.
+2020-12 schema that describes the shape of the root entity. A ``<<PK>>`` stays a
+plain property. Every ``<<FK>>`` is dropped, because the document expresses the
+link by containment; an FK that containment cannot carry is an error. It
+deliberately emits no validation keywords: value constraints belong to the API
+layer.
 """
 
 from __future__ import annotations
@@ -90,6 +92,7 @@ class Attribute:
     name: str
     puml_type: str
     marker: str | None
+    line: int
 
 
 @dataclass
@@ -258,7 +261,9 @@ def _add_attribute(definition: ClassDef, match: re.Match[str], number: int) -> N
         raise PumlError(
             f"duplicate attribute '{name}' in class '{definition.name}'", number
         )
-    definition.attributes.append(Attribute(name=name, puml_type=puml_type, marker=marker))
+    definition.attributes.append(
+        Attribute(name=name, puml_type=puml_type, marker=marker, line=number)
+    )
 
 
 def _parse_relationship(line: str, number: int) -> Relationship:
@@ -332,41 +337,76 @@ def _check_containment_cycles(
             visit(name)
 
 
-def _redundant_foreign_keys(
-    model: Model, root: str | None
-) -> set[tuple[str, str]]:
-    """Return the (class, attribute) pairs that containment already expresses.
+def _check_foreign_keys(model: Model, root: str | None) -> None:
+    """Reject a foreign key the document cannot carry.
 
-    An ``<<FK>>`` is redundant only when the class it points at sits on every
-    containment path from the root to the class that declares it. Anything the
-    rule cannot prove is a plain property, because dropping it would lose the
-    link: a sibling target, a target above only on another path of a shared
-    definition, an ambiguous target, and an unknown target all stay.
+    Every ``<<FK>>`` is dropped from the document, so the link has to survive as
+    containment. It does only when exactly one class declares a ``<<PK>>`` with
+    the same name and that class sits above the declaring class on a path from
+    the root. Anything else would lose the link, so it is an error rather than
+    a silent deletion.
     """
-    dominators = _dominators(model, root)
     pk_owners: dict[str, list[str]] = {}
     for definition in model.classes.values():
         for attribute in definition.attributes:
             if attribute.marker == "PK":
                 pk_owners.setdefault(attribute.name, []).append(definition.name)
 
-    redundant: set[tuple[str, str]] = set()
+    ancestors = _containment_ancestors(model, root)
+    root_name = root or "(none)"
+
     for definition in model.classes.values():
-        above = dominators.get(definition.name, set())
         for attribute in definition.attributes:
             if attribute.marker != "FK":
                 continue
+            where = (
+                f"attribute '{attribute.name}' in class '{definition.name}' "
+                "is <<FK>>"
+            )
             owners = pk_owners.get(attribute.name, [])
-            if len(owners) == 1 and owners[0] in above:
-                redundant.add((definition.name, attribute.name))
-    return redundant
+            if not owners:
+                raise PumlError(
+                    f"{where}, but no class declares <<PK>> '{attribute.name}'; "
+                    "rename it to match the primary key it points at",
+                    attribute.line,
+                )
+            if len(owners) > 1:
+                names = sorted(owners)
+                listed = ", ".join(names[:-1]) + f" and {names[-1]}"
+                raise PumlError(
+                    f"{where}, but classes {listed} declare "
+                    f"<<PK>> '{attribute.name}'; give the keys "
+                    "distinct names",
+                    attribute.line,
+                )
+            if definition.name not in ancestors:
+                raise PumlError(
+                    f"{where}, but class '{definition.name}' is not reachable "
+                    f"from root '{root_name}', so containment cannot carry "
+                    "the link",
+                    attribute.line,
+                )
+            if owners[0] not in ancestors[definition.name]:
+                raise PumlError(
+                    f"{where}, but class '{owners[0]}' is not above "
+                    f"'{definition.name}' on any path from root '{root_name}'; "
+                    f"nest '{owners[0]}' above '{definition.name}'",
+                    attribute.line,
+                )
 
 
-def _dominators(model: Model, root: str | None) -> dict[str, set[str]]:
-    """Map each class reachable from the root to the classes on every path.
+def _containment_ancestors(
+    model: Model, root: str | None
+) -> dict[str, set[str]]:
+    """Map each class reachable from the root to the classes above it.
 
-    The root dominates itself. A class outside the root's containment tree has
-    no entry, so nothing in it counts as redundant.
+    A class is above another when some containment path from the root passes
+    through it first. A class outside the root's containment tree has no entry,
+    so a foreign key it declares has no document representation.
+
+    A parsed model has no containment cycle, so this fixpoint converges on a
+    tree. A hand-built cycle can make a class its own ancestor, which no parsed
+    input can produce.
     """
     if root is None or root not in model.classes:
         return {}
@@ -386,24 +426,22 @@ def _dominators(model: Model, root: str | None) -> dict[str, set[str]]:
         reachable.add(name)
         pending.extend(children[name])
 
-    dominators = {name: set(reachable) for name in reachable}
-    dominators[root] = {root}
+    ancestors: dict[str, set[str]] = {name: set() for name in reachable}
     changed = True
     while changed:
         changed = False
         for name in reachable - {root}:
             incoming = parents[name] & reachable
-            shared = (
-                set.intersection(*(dominators[p] for p in incoming))
+            above = (
+                set().union(*(ancestors[parent] | {parent} for parent in incoming))
                 if incoming
                 else set()
             )
-            updated = shared | {name}
-            if updated != dominators[name]:
-                dominators[name] = updated
+            if above != ancestors[name]:
+                ancestors[name] = above
                 changed = True
 
-    return dominators
+    return ancestors
 
 
 def build_schema(model: Model, config: Config | None = None) -> dict:
@@ -418,7 +456,7 @@ def build_schema(model: Model, config: Config | None = None) -> dict:
 
     entity_names = _resolve_entity_names(model, config)
     root_class, root_entity = _resolve_root(model, config, entity_names)
-    hidden = _redundant_foreign_keys(model, root_class)
+    _check_foreign_keys(model, root_class)
 
     relationships_by_parent: dict[str, list[Relationship]] = {}
     for relationship in model.relationships:
@@ -429,7 +467,7 @@ def build_schema(model: Model, config: Config | None = None) -> dict:
         properties: dict[str, dict] = {}
         origins: dict[str, str] = {}
         for attribute in definition.attributes:
-            if (definition.name, attribute.name) in hidden:
+            if attribute.marker == "FK":
                 continue
             property_name = _lower_first(attribute.name)
             origins[property_name] = f"attribute '{attribute.name}'"

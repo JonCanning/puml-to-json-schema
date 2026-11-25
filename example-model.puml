@@ -67,6 +67,7 @@ class FINE {
 }
 
 ' Relationships
+LIBRARY ||--o{ MEMBER : members
 LIBRARY ||--o{ SHELF : has
 LIBRARY ||--o{ BOOK : holds
 SHELF ||--o{ BOOK : stores

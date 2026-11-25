@@ -33,16 +33,17 @@ EXPECTED_ENTITIES = {
     "Shelf",
 }
 
-# Attribute counts read straight from example-model.puml, after redundant
-# foreign keys are dropped. Relationship properties are counted separately, so
-# these stay stable when the relationship table changes. Loan loses `isbn`
-# because Book is above it on every containment path from the Library root.
+# Attribute counts read straight from example-model.puml, after foreign keys are
+# dropped. Relationship properties are counted separately, so these stay stable
+# when the relationship table changes. Loan loses both `memberId` and `isbn`,
+# because the generator drops every `<<FK>>` and requires the target to sit above
+# the holder in the containment tree from the Library root.
 EXPECTED_ATTRIBUTE_COUNTS = {
     "Library": 4,
     "Member": 5,
     "Book": 5,
     "Shelf": 3,
-    "Loan": 6,
+    "Loan": 5,
     "Fine": 5,
 }
 
@@ -117,7 +118,7 @@ class ParserTests(unittest.TestCase):
         model = parse_text(MODEL_PATH.read_text(encoding="utf-8"))
 
         self.assertEqual(len(model.classes), 6)
-        self.assertEqual(len(model.relationships), 6)
+        self.assertEqual(len(model.relationships), 7)
 
     def test_unmatched_closing_brace_reports_its_line(self):
         with self.assertRaises(PumlError) as caught:
@@ -311,7 +312,6 @@ class ConfigTests(unittest.TestCase):
         config = generator.parse_config(
             json.dumps(
                 {
-                    "root_entity": "MEMBER",
                     "entity_names": {"MEMBER": "Borrower", "BOOK": "Tome"},
                     "relationship_names": {"MEMBER": {"LOAN": "activeLoans"}},
                 }
@@ -319,7 +319,7 @@ class ConfigTests(unittest.TestCase):
         )
         schema = build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
 
-        self.assertEqual(schema["$ref"], "#/$defs/Borrower")
+        self.assertEqual(schema["$ref"], "#/$defs/Library")
         self.assertIn("Borrower", schema["$defs"])
         self.assertNotIn("Member", schema["$defs"])
         self.assertEqual(
@@ -333,11 +333,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(list(schema["$defs"]), sorted(schema["$defs"]))
 
     def test_root_may_be_an_entity_name(self):
-        config = generator.parse_config(json.dumps({"root_entity": "Loan"}))
+        config = generator.parse_config(json.dumps({"root_entity": "Shelf"}))
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  * libraryId : string <<PK>>\n}\n"
+            "class SHELF {\n  * shelfCode : string <<PK>>\n}\n"
+            "@enduml\n"
+        )
 
-        schema = build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+        schema = build_schema(parse_text(text), config)
 
-        self.assertEqual(schema["$ref"], "#/$defs/Loan")
+        self.assertEqual(schema["$ref"], "#/$defs/Shelf")
 
     def test_non_library_model_gets_a_resolvable_root(self):
         text = (
@@ -453,7 +459,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_relationship_names_entry_must_match_a_relationship(self):
         config = generator.parse_config(
-            json.dumps({"relationship_names": {"LIBRARY": {"MEMBER": "members"}}})
+            json.dumps({"relationship_names": {"SHELF": {"FINE": "fines"}}})
         )
 
         with self.assertRaises(ConfigError) as caught:
@@ -636,7 +642,7 @@ class EmissionTests(unittest.TestCase):
                     ],
                 )
 
-    def test_fk_without_a_containment_target_stays_a_plain_property(self):
+    def test_fk_without_a_containment_target_is_an_error(self):
         text = (
             "@startuml\n"
             "class LOAN {\n"
@@ -645,11 +651,9 @@ class EmissionTests(unittest.TestCase):
             "}\n"
             "@enduml\n"
         )
-        properties = schema_for(text)["$defs"]["Loan"]["properties"]
 
-        self.assertEqual(set(properties), {"loanId", "memberId"})
-        self.assertEqual(properties["loanId"], {"type": "string"})
-        self.assertEqual(properties["memberId"], {"type": "string"})
+        with self.assertRaises(generator.PumlError):
+            schema_for(text)
 
     def test_defs_are_sorted_by_name(self):
         schema = schema_for(MODEL_PATH.read_text(encoding="utf-8"))
@@ -694,7 +698,7 @@ class EmissionTests(unittest.TestCase):
 
 
 class ForeignKeyTests(unittest.TestCase):
-    """An FK is dropped only when containment already carries the link."""
+    """Every FK is dropped; one that containment cannot carry is an error."""
 
     def test_fk_to_an_ancestor_is_dropped(self):
         text = (
@@ -713,7 +717,7 @@ class ForeignKeyTests(unittest.TestCase):
 
         self.assertEqual(set(properties), {"isbn", "title"})
 
-    def test_fk_to_every_ancestor_in_a_chain_is_dropped(self):
+    def test_fk_to_a_chain_of_ancestors_is_dropped(self):
         config = generator.parse_config(json.dumps({"root_entity": "A"}))
         text = (
             "@startuml\n"
@@ -734,87 +738,112 @@ class ForeignKeyTests(unittest.TestCase):
         self.assertEqual(set(schema["$defs"]["B"]["properties"]), {"bId", "hasC"})
         self.assertEqual(set(schema["$defs"]["C"]["properties"]), {"cId"})
 
-    def test_fk_to_a_sibling_stays(self):
+    def test_fk_above_on_one_of_two_paths_is_dropped(self):
         config = generator.parse_config(json.dumps({"root_entity": "A"}))
         text = (
             "@startuml\n"
             "class A {\n  * aId : string <<PK>>\n}\n"
-            "class PARTY {\n  * partyId : string <<PK>>\n}\n"
-            "class VEHICLE {\n"
-            "  * vehicleId : string <<PK>>\n"
-            "  partyId : string <<FK>>\n"
-            "}\n"
-            "A ||--o{ PARTY : hasParties\n"
-            "A ||--o{ VEHICLE : hasVehicles\n"
-            "@enduml\n"
-        )
-
-        schema = build_schema(parse_text(text), config)
-
-        self.assertIn("partyId", schema["$defs"]["Vehicle"]["properties"])
-
-    def test_fk_above_only_on_one_path_stays(self):
-        config = generator.parse_config(json.dumps({"root_entity": "A"}))
-        text = (
-            "@startuml\n"
-            "class A {\n  * aId : string <<PK>>\n}\n"
-            "class B {\n  * bId : string <<PK>>\n}\n"
-            "class C {\n  * cId : string <<PK>>\n}\n"
-            "class D {\n"
-            "  * dId : string <<PK>>\n"
+            "class B {\n  * bId : string <<PK>>\n  aId : string <<FK>>\n}\n"
+            "class C {\n"
+            "  * cId : string <<PK>>\n"
             "  aId : string <<FK>>\n"
             "  bId : string <<FK>>\n"
             "}\n"
             "A ||--o{ B : hasB\n"
             "A ||--o{ C : hasC\n"
-            "B ||--o{ D : hasDThroughB\n"
-            "C ||--o{ D : hasDThroughC\n"
+            "B ||--o{ C : fromB\n"
             "@enduml\n"
         )
 
         schema = build_schema(parse_text(text), config)
 
-        self.assertEqual(set(schema["$defs"]["D"]["properties"]), {"dId", "bId"})
+        self.assertEqual(set(schema["$defs"]["C"]["properties"]), {"cId"})
 
-    def test_fk_with_an_ambiguous_target_stays(self):
-        config = generator.parse_config(json.dumps({"root_entity": "A"}))
+    def test_fk_to_a_sibling_is_an_error(self):
         text = (
             "@startuml\n"
             "class A {\n  * aId : string <<PK>>\n}\n"
-            "class BOOK {\n  * code : string <<PK>>\n}\n"
-            "class SHELF {\n  * code : string <<PK>>\n}\n"
-            "class NOTE {\n"
-            "  * noteId : string <<PK>>\n"
-            "  code : string <<FK>>\n"
-            "}\n"
-            "A ||--o{ BOOK : hasBooks\n"
-            "A ||--o{ SHELF : hasShelves\n"
-            "A ||--o{ NOTE : hasNotes\n"
-            "@enduml\n"
-        )
-
-        schema = build_schema(parse_text(text), config)
-
-        self.assertIn("code", schema["$defs"]["Note"]["properties"])
-
-    def test_fk_with_no_matching_pk_stays(self):
-        config = generator.parse_config(json.dumps({"root_entity": "A"}))
-        text = (
-            "@startuml\n"
-            "class A {\n  * aId : string <<PK>>\n}\n"
-            "class B {\n"
-            "  * bId : string <<PK>>\n"
-            "  externalRef : string <<FK>>\n"
-            "}\n"
+            "class B {\n  * bId : string <<PK>>\n}\n"
+            "class C {\n  * cId : string <<PK>>\n  bId : string <<FK>>\n}\n"
             "A ||--o{ B : hasB\n"
+            "A ||--o{ C : hasC\n"
             "@enduml\n"
         )
 
-        schema = build_schema(parse_text(text), config)
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
 
-        self.assertIn("externalRef", schema["$defs"]["B"]["properties"])
+        self.assertIn("class 'B' is not above 'C'", str(caught.exception))
+        self.assertIn("nest 'B' above 'C'", str(caught.exception))
 
-    def test_dropped_fk_depends_on_the_root(self):
+    def test_fk_with_an_ambiguous_target_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class A {\n  * ref : string <<PK>>\n}\n"
+            "class B {\n  * ref : string <<PK>>\n}\n"
+            "class C {\n  * cId : string <<PK>>\n  ref : string <<FK>>\n}\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
+
+        self.assertIn("classes A and B declare <<PK>> 'ref'", str(caught.exception))
+
+    def test_fk_with_no_matching_pk_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class LOAN {\n"
+            "  * loanId : string <<PK>>\n"
+            "  memberId : string <<FK>>\n"
+            "}\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
+
+        self.assertIn("no class declares <<PK>> 'memberId'", str(caught.exception))
+
+    def test_fk_in_a_class_outside_the_root_tree_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  * libraryId : string <<PK>>\n}\n"
+            "class ORPHAN {\n"
+            "  * orphanId : string <<PK>>\n"
+            "  libraryId : string <<FK>>\n"
+            "}\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
+
+        self.assertIn(
+            "class 'ORPHAN' is not reachable from root 'LIBRARY'",
+            str(caught.exception),
+        )
+
+    def test_fk_error_reports_the_attribute_line(self):
+        lines = [
+            "@startuml",
+            "class LOAN {",
+            "  * loanId : string <<PK>>",
+            "  memberId : string <<FK>>",
+            "}",
+            "@enduml",
+        ]
+        text = "\n".join(lines) + "\n"
+
+        with self.assertRaises(generator.PumlError) as caught:
+            schema_for(text)
+
+        self.assertEqual(
+            caught.exception.line, lines.index("  memberId : string <<FK>>") + 1
+        )
+
+    def test_fk_above_no_path_from_the_root_is_an_error(self):
+        config = generator.parse_config(json.dumps({"root_entity": "LOAN"}))
         text = (
             "@startuml\n"
             "class LIBRARY {\n  * libraryId : string <<PK>>\n}\n"
@@ -827,21 +856,22 @@ class ForeignKeyTests(unittest.TestCase):
             "MEMBER ||--o{ LOAN : takes\n"
             "@enduml\n"
         )
-        model = parse_text(text)
 
-        default_loan = build_schema(model)["$defs"]["Loan"]["properties"]
+        default_loan = schema_for(text)["$defs"]["Loan"]["properties"]
         self.assertNotIn("memberId", default_loan)
 
-        config = generator.parse_config(json.dumps({"root_entity": "LOAN"}))
-        loan_root_loan = build_schema(model, config)["$defs"]["Loan"]["properties"]
-        self.assertIn("memberId", loan_root_loan)
+        with self.assertRaises(generator.PumlError) as caught:
+            build_schema(parse_text(text), config)
 
-    def test_example_loan_keeps_the_fk_containment_does_not_express(self):
+        self.assertIn("class 'MEMBER' is not above 'LOAN'", str(caught.exception))
+
+    def test_example_drops_both_loan_foreign_keys(self):
         schema = schema_for(MODEL_PATH.read_text(encoding="utf-8"))
         loan = schema["$defs"]["Loan"]["properties"]
 
         self.assertNotIn("isbn", loan)
-        self.assertIn("memberId", loan)
+        self.assertNotIn("memberId", loan)
+        self.assertEqual(loan["loanId"], {"type": "string"})
 
 
 class FullModelTests(unittest.TestCase):
@@ -899,11 +929,13 @@ class FullModelTests(unittest.TestCase):
         )
 
     def test_attribute_counts_match_the_model(self):
-        relationship_names = set(generator.RELATIONSHIP_NAMES.values())
-
         for entity, expected in EXPECTED_ATTRIBUTE_COUNTS.items():
             properties = self.schema["$defs"][entity]["properties"]
-            attributes = [name for name in properties if name not in relationship_names]
+            attributes = [
+                name
+                for name, value in properties.items()
+                if "$ref" not in value and "items" not in value
+            ]
             self.assertEqual(
                 len(attributes),
                 expected,
@@ -917,10 +949,11 @@ class FullModelTests(unittest.TestCase):
             entity = generator.ENTITY_NAMES[relationship.parent]
             expected[entity] = expected.get(entity, 0) + 1
 
-        relationship_names = set(generator.RELATIONSHIP_NAMES.values())
         for entity, definition in self.schema["$defs"].items():
             relationships = [
-                name for name in definition["properties"] if name in relationship_names
+                name
+                for name, value in definition["properties"].items()
+                if "$ref" in value or "items" in value
             ]
             self.assertEqual(
                 len(relationships),
@@ -930,11 +963,13 @@ class FullModelTests(unittest.TestCase):
             )
 
     def test_required_lists_only_relationship_properties(self):
-        relationship_names = set(generator.RELATIONSHIP_NAMES.values())
-
         for entity, definition in self.schema["$defs"].items():
             for name in definition.get("required", []):
-                self.assertIn(name, relationship_names, f"{entity} requires {name}")
+                value = definition["properties"][name]
+                self.assertTrue(
+                    "$ref" in value or "items" in value,
+                    f"{entity} requires {name}",
+                )
 
     def test_named_field_spellings_are_preserved(self):
         library = self.schema["$defs"]["Library"]["properties"]
@@ -1070,15 +1105,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output.read_bytes(), GOLDEN_PATH.read_bytes())
 
-    def test_config_file_changes_the_root_and_entity_names(self):
+    def test_config_file_changes_the_entity_names(self):
         config = self.dir / "config.json"
         config.write_text(
-            json.dumps(
-                {
-                    "root_entity": "MEMBER",
-                    "entity_names": {"MEMBER": "Borrower"},
-                }
-            ),
+            json.dumps({"entity_names": {"MEMBER": "Borrower"}}),
             encoding="utf-8",
         )
         output = self.dir / "out.json"
@@ -1093,8 +1123,28 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         schema = json.loads(output.read_text(encoding="utf-8"))
-        self.assertEqual(schema["$ref"], "#/$defs/Borrower")
+        self.assertEqual(schema["$ref"], "#/$defs/Library")
         self.assertIn("Borrower", schema["$defs"])
+
+    def test_root_below_a_foreign_key_is_reported(self):
+        config = self.dir / "config.json"
+        config.write_text(
+            json.dumps({"root_entity": "MEMBER"}),
+            encoding="utf-8",
+        )
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(config),
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not above", result.stderr)
+        self.assertFalse(output.exists())
 
     def test_missing_config_file_reports_one_line(self):
         missing = self.dir / "missing.json"
