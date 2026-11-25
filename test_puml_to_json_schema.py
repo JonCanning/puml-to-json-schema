@@ -32,15 +32,16 @@ EXPECTED_ENTITIES = {
     "Shelf",
 }
 
-# Attribute counts read straight from example-model.puml. Relationship
-# properties are counted separately, so these stay stable when the
-# relationship table changes.
+# Attribute counts read straight from example-model.puml, after redundant
+# foreign keys are dropped. Relationship properties are counted separately, so
+# these stay stable when the relationship table changes. Loan loses `isbn`
+# because Book is above it on every containment path from the Library root.
 EXPECTED_ATTRIBUTE_COUNTS = {
     "Library": 4,
     "Member": 5,
     "Book": 5,
     "Shelf": 3,
-    "Loan": 7,
+    "Loan": 6,
     "Fine": 5,
 }
 
@@ -580,7 +581,7 @@ class EmissionTests(unittest.TestCase):
                     ],
                 )
 
-    def test_pk_and_fk_attributes_become_plain_properties(self):
+    def test_fk_without_a_containment_target_stays_a_plain_property(self):
         text = (
             "@startuml\n"
             "class LOAN {\n"
@@ -635,6 +636,157 @@ class EmissionTests(unittest.TestCase):
             list(schema["$defs"]["Library"]["properties"]),
             ["libraryName", "shelfCodeSector", "bookIsbnCode", "openingHour"],
         )
+
+
+class ForeignKeyTests(unittest.TestCase):
+    """An FK is dropped only when containment already carries the link."""
+
+    def test_fk_to_an_ancestor_is_dropped(self):
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  * libraryId : string <<PK>>\n}\n"
+            "class BOOK {\n"
+            "  * isbn : string <<PK>>\n"
+            "  libraryId : string <<FK>>\n"
+            "  title : string\n"
+            "}\n"
+            "LIBRARY ||--o{ BOOK : holds\n"
+            "@enduml\n"
+        )
+
+        properties = schema_for(text)["$defs"]["Book"]["properties"]
+
+        self.assertEqual(set(properties), {"isbn", "title"})
+
+    def test_fk_to_every_ancestor_in_a_chain_is_dropped(self):
+        config = generator.parse_config(json.dumps({"root_entity": "A"}))
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class B {\n  * bId : string <<PK>>\n  aId : string <<FK>>\n}\n"
+            "class C {\n"
+            "  * cId : string <<PK>>\n"
+            "  aId : string <<FK>>\n"
+            "  bId : string <<FK>>\n"
+            "}\n"
+            "A ||--o{ B : hasB\n"
+            "B ||--o{ C : hasC\n"
+            "@enduml\n"
+        )
+
+        schema = build_schema(parse_text(text), config)
+
+        self.assertEqual(set(schema["$defs"]["B"]["properties"]), {"bId", "hasC"})
+        self.assertEqual(set(schema["$defs"]["C"]["properties"]), {"cId"})
+
+    def test_fk_to_a_sibling_stays(self):
+        config = generator.parse_config(json.dumps({"root_entity": "A"}))
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class PARTY {\n  * partyId : string <<PK>>\n}\n"
+            "class VEHICLE {\n"
+            "  * vehicleId : string <<PK>>\n"
+            "  partyId : string <<FK>>\n"
+            "}\n"
+            "A ||--o{ PARTY : hasParties\n"
+            "A ||--o{ VEHICLE : hasVehicles\n"
+            "@enduml\n"
+        )
+
+        schema = build_schema(parse_text(text), config)
+
+        self.assertIn("partyId", schema["$defs"]["Vehicle"]["properties"])
+
+    def test_fk_above_only_on_one_path_stays(self):
+        config = generator.parse_config(json.dumps({"root_entity": "A"}))
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class B {\n  * bId : string <<PK>>\n}\n"
+            "class C {\n  * cId : string <<PK>>\n}\n"
+            "class D {\n"
+            "  * dId : string <<PK>>\n"
+            "  aId : string <<FK>>\n"
+            "  bId : string <<FK>>\n"
+            "}\n"
+            "A ||--o{ B : hasB\n"
+            "A ||--o{ C : hasC\n"
+            "B ||--o{ D : hasDThroughB\n"
+            "C ||--o{ D : hasDThroughC\n"
+            "@enduml\n"
+        )
+
+        schema = build_schema(parse_text(text), config)
+
+        self.assertEqual(set(schema["$defs"]["D"]["properties"]), {"dId", "bId"})
+
+    def test_fk_with_an_ambiguous_target_stays(self):
+        config = generator.parse_config(json.dumps({"root_entity": "A"}))
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class BOOK {\n  * code : string <<PK>>\n}\n"
+            "class SHELF {\n  * code : string <<PK>>\n}\n"
+            "class NOTE {\n"
+            "  * noteId : string <<PK>>\n"
+            "  code : string <<FK>>\n"
+            "}\n"
+            "A ||--o{ BOOK : hasBooks\n"
+            "A ||--o{ SHELF : hasShelves\n"
+            "A ||--o{ NOTE : hasNotes\n"
+            "@enduml\n"
+        )
+
+        schema = build_schema(parse_text(text), config)
+
+        self.assertIn("code", schema["$defs"]["Note"]["properties"])
+
+    def test_fk_with_no_matching_pk_stays(self):
+        config = generator.parse_config(json.dumps({"root_entity": "A"}))
+        text = (
+            "@startuml\n"
+            "class A {\n  * aId : string <<PK>>\n}\n"
+            "class B {\n"
+            "  * bId : string <<PK>>\n"
+            "  externalRef : string <<FK>>\n"
+            "}\n"
+            "A ||--o{ B : hasB\n"
+            "@enduml\n"
+        )
+
+        schema = build_schema(parse_text(text), config)
+
+        self.assertIn("externalRef", schema["$defs"]["B"]["properties"])
+
+    def test_dropped_fk_depends_on_the_root(self):
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  * libraryId : string <<PK>>\n}\n"
+            "class MEMBER {\n  * memberId : string <<PK>>\n}\n"
+            "class LOAN {\n"
+            "  * loanId : string <<PK>>\n"
+            "  memberId : string <<FK>>\n"
+            "}\n"
+            "LIBRARY ||--o{ MEMBER : has\n"
+            "MEMBER ||--o{ LOAN : takes\n"
+            "@enduml\n"
+        )
+        model = parse_text(text)
+
+        default_loan = build_schema(model)["$defs"]["Loan"]["properties"]
+        self.assertNotIn("memberId", default_loan)
+
+        config = generator.parse_config(json.dumps({"root_entity": "LOAN"}))
+        loan_root_loan = build_schema(model, config)["$defs"]["Loan"]["properties"]
+        self.assertIn("memberId", loan_root_loan)
+
+    def test_example_loan_keeps_the_fk_containment_does_not_express(self):
+        schema = schema_for(MODEL_PATH.read_text(encoding="utf-8"))
+        loan = schema["$defs"]["Loan"]["properties"]
+
+        self.assertNotIn("isbn", loan)
+        self.assertIn("memberId", loan)
 
 
 class FullModelTests(unittest.TestCase):
