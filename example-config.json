@@ -1,0 +1,29 @@
+{
+  "root_entity": "LIBRARY",
+  "entity_names": {
+    "LIBRARY": "Library",
+    "MEMBER": "Member",
+    "BOOK": "Book",
+    "SHELF": "Shelf",
+    "LOAN": "Loan",
+    "FINE": "Fine"
+  },
+  "relationship_names": {
+    "LIBRARY": {
+      "SHELF": "shelves",
+      "BOOK": "books"
+    },
+    "SHELF": {
+      "BOOK": "books"
+    },
+    "MEMBER": {
+      "LOAN": "loans"
+    },
+    "BOOK": {
+      "LOAN": "loans"
+    },
+    "LOAN": {
+      "FINE": "fine"
+    }
+  }
+}

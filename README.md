@@ -2,7 +2,8 @@
 
 `puml_to_json_schema.py` reads a PlantUML class diagram and writes a draft
 2020-12 JSON Schema that describes the shape of the root entity. The PlantUML
-model is the only input. The generator emits structure only: property names,
+model is the input; an optional JSON configuration file overrides the root class
+and the generated names. The generator emits structure only: property names,
 property types, and which relationships are required. It emits no value
 constraints, because those belong to the layer that consumes the schema.
 
@@ -23,6 +24,62 @@ python puml_to_json_schema.py example-model.puml --output generated/example.sche
 
 The command prints nothing on success and exits 0. It creates the output
 directory when that directory does not exist.
+
+## Configure the model mappings
+
+`--config` accepts an optional JSON file. The file names the root class and
+overrides generated entity and property names:
+
+```json
+{
+  "root_entity": "MEMBER",
+  "entity_names": {
+    "MEMBER": "Borrower",
+    "BOOK": "Tome"
+  },
+  "relationship_names": {
+    "MEMBER": {
+      "LOAN": "activeLoans"
+    }
+  }
+}
+```
+
+```powershell
+python puml_to_json_schema.py example-model.puml --output generated/borrower.schema.json --config borrower-config.json
+```
+
+The top-level `$ref` becomes `#/$defs/Borrower`. `Member` becomes `Borrower`
+everywhere, including the `$defs` key. `Book` becomes `Tome`, including inside
+each `$ref` that points at it. `Member.loans` becomes `Borrower.activeLoans`.
+
+All three keys are optional:
+
+- `root_entity` names the class whose entity the top-level `$ref` points at. It
+  may also name an entity. When omitted, the `LIBRARY` class is the root.
+- `entity_names` maps a class name to the name used in `$defs`.
+- `relationship_names` maps a parent class and child class to the property name
+  that carries the reference. It uses both class names as the key, because one
+  label can appear on several relationships.
+
+Each value must be an identifier: a letter or `_`, then letters, digits, or `_`.
+Without an override, a class name becomes PascalCase
+(`ORDER_LINE` becomes `OrderLine`). A relationship label becomes lowerCamelCase
+(`appears in` becomes `appearsIn`). The example model keeps its built-in names,
+so `example-config.json` reproduces the golden schema byte for byte.
+
+The generator rejects a configuration that could silently produce a wrong
+schema:
+
+- unknown top-level keys, duplicate keys, or a document that is not an object
+- a class, root, or relationship mapping that the model does not contain
+- a name that is not an identifier
+- two classes that resolve to one `$defs` name
+- two properties that resolve to one name in the same entity
+
+The same collision check covers the model itself. An attribute and a
+relationship that produce one property name are an error. So is a relationship
+declared twice.
 
 ## The document
 
@@ -300,34 +357,41 @@ the opening brace.
 
 ## Extending the model
 
-Three tables at the top of the script hold the naming and type rules:
-`TYPE_MAP`, `ENTITY_NAMES`, and `RELATIONSHIP_NAMES`. `ENTITY_NAMES` maps a
-PlantUML class name to the name used in `$defs`. `RELATIONSHIP_NAMES` maps a
-parent and child pair to the property name that carries the reference.
+`TYPE_MAP` holds the attribute type rules. Names come from three places, in
+precedence order:
 
-A class or relationship without an entry is an error. The message names the
-class, or the parent and child pair, and reports the line where it was declared.
-This keeps a new class from slipping into the output under a guessed name.
+1. The `--config` overrides `entity_names` and `relationship_names`.
+2. The built-in `ENTITY_NAMES` and `RELATIONSHIP_NAMES` tables, which describe
+   the example model and keep its output stable.
+3. A name derived from the class name (`ORDER_LINE` becomes `OrderLine`) or the
+   relationship label (`appears in` becomes `appearsIn`).
+
+A class or relationship outside the built-in tables needs no code change. Add it
+to the model, then add an override only where the derived name is not the one
+you want. Labels such as `has` or `includes` are ambiguous, so a relationship
+override names both the parent and the child class.
 
 The generator emits a property only on the parent side of a relationship. A
 navigable reverse direction needs its own declared relationship and its own
-table entry.
+override entry.
 
-`ROOT_ENTITY` names the entity that the top-level `$ref` points at. Change it
-when a different class becomes the entry point.
+`root_entity` names the entity that the top-level `$ref` points at, so changing
+the entry point needs no constant edit.
 
 `PK` and `FK` markers are accepted and then ignored. They do not change the
 emitted property, and they do not add or remove anything from `required`.
 
 ## Command line contract
 
-`--output` is required. The generator refuses an output path that resolves to
-the input file, including a path that differs only in letter case.
+`--output` is required and `--config` is optional. The generator refuses an
+output path that resolves to the input file, including a path that differs only
+in letter case.
 
 Every failure prints one line to stderr and exits 2. The forms are:
 
 - `path: line N: message` for a problem in the model
-- `path: message` for an unreadable input, invalid UTF-8, or an unwritable output
+- `path: message` for an unreadable input, invalid UTF-8, an unwritable output,
+  or a problem in the configuration file
 - `puml_to_json_schema.py: message` for a missing or invalid argument
 
 A failure never prints a traceback.
@@ -348,13 +412,14 @@ which would otherwise break the byte comparison on Windows.
 python -m unittest -v
 ```
 
-The suite runs 55 tests. It covers the parser errors, the emission shapes, the
-example model against the golden fixture, the command line contract, and the
-determinism checks.
+The suite runs 80 tests. It covers the parser errors, the emission shapes, and
+the example model against the golden fixture. It also covers the configuration
+overrides and their errors, the command line contract, and determinism.
 
 ## Layout
 
 ```
+example-config.json                a configuration that reproduces the defaults
 example-model.puml                 the input model
 puml_to_json_schema.py             the generator
 generated/example.schema.json      the generated schema
@@ -366,8 +431,7 @@ test_puml_to_json_schema.py        the tests
 
 These are defects in the current generator rather than intended behaviour:
 
-- A relationship declared twice produces a duplicate entry in `required`, which fails the 2020-12 meta-schema.
 - A left-hand `o{` is validated and then ignored, so write relationships from the parent to the child.
-- A model whose root entity is missing emits a top-level `$ref` that cannot resolve.
+- Without `--config`, a model with no `LIBRARY` class emits a top-level `$ref`
+  that cannot resolve.
 - An output path that is a hardlink to the input is not recognised as the same file, so the input is overwritten.
-- An attribute and a relationship that resolve to the same property name collide, and the relationship silently wins.

@@ -14,10 +14,11 @@ import unittest
 from pathlib import Path
 
 import puml_to_json_schema as generator
-from puml_to_json_schema import PumlError, build_schema, parse_puml
+from puml_to_json_schema import ConfigError, PumlError, build_schema, parse_puml
 
 ROOT = Path(__file__).resolve().parent
 MODEL_PATH = ROOT / "example-model.puml"
+CONFIG_PATH = ROOT / "example-config.json"
 FIXTURES = ROOT / "tests" / "fixtures"
 GOLDEN_PATH = FIXTURES / "example.schema.golden.json"
 SCRIPT = ROOT / "puml_to_json_schema.py"
@@ -266,28 +267,226 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(caught.exception.line, 3)
         self.assertIn("unsupported attribute marker 'UK'", str(caught.exception))
 
-    def test_unmapped_class_name_is_an_error(self):
+    def test_unlisted_class_derives_an_entity_name(self):
         text = "@startuml\nclass UNKNOWN_ENTITY {\n  a : string\n}\n@enduml\n"
-        model = parse_text(text)
 
-        with self.assertRaises(PumlError) as caught:
-            build_schema(model)
+        schema = build_schema(parse_text(text))
 
-        self.assertIn("UNKNOWN_ENTITY", str(caught.exception))
+        self.assertEqual(set(schema["$defs"]), {"UnknownEntity"})
 
-    def test_unmapped_relationship_name_is_an_error(self):
+    def test_unlisted_relationship_derives_a_property_name(self):
         text = (
             "@startuml\n"
             "class LIBRARY {\n  a : string\n}\n"
             "class MEMBER {\n  b : string\n}\n"
-            "LIBRARY ||--o| MEMBER : back\n"
+            "LIBRARY ||--o| MEMBER : appears in\n"
+            "@enduml\n"
+        )
+
+        schema = build_schema(parse_text(text))
+
+        self.assertIn("appearsIn", schema["$defs"]["Library"]["properties"])
+
+
+class ConfigTests(unittest.TestCase):
+    """The optional configuration file and the naming rules it drives."""
+
+    def test_defaults_are_empty(self):
+        config = generator.parse_config("{}")
+
+        self.assertIsNone(config.root_entity)
+        self.assertEqual(config.entity_names, {})
+        self.assertEqual(config.relationship_names, {})
+
+    def test_configured_names_replace_the_built_in_defaults(self):
+        config = generator.parse_config(
+            json.dumps(
+                {
+                    "root_entity": "MEMBER",
+                    "entity_names": {"MEMBER": "Borrower", "BOOK": "Tome"},
+                    "relationship_names": {"MEMBER": {"LOAN": "activeLoans"}},
+                }
+            )
+        )
+        schema = build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertEqual(schema["$ref"], "#/$defs/Borrower")
+        self.assertIn("Borrower", schema["$defs"])
+        self.assertNotIn("Member", schema["$defs"])
+        self.assertEqual(
+            schema["$defs"]["Borrower"]["properties"]["activeLoans"],
+            {"type": "array", "items": {"$ref": "#/$defs/Loan"}},
+        )
+        self.assertEqual(
+            schema["$defs"]["Library"]["properties"]["books"],
+            {"type": "array", "items": {"$ref": "#/$defs/Tome"}},
+        )
+        self.assertEqual(list(schema["$defs"]), sorted(schema["$defs"]))
+
+    def test_root_may_be_an_entity_name(self):
+        config = generator.parse_config(json.dumps({"root_entity": "Loan"}))
+
+        schema = build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertEqual(schema["$ref"], "#/$defs/Loan")
+
+    def test_unknown_top_level_key_is_an_error(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config(json.dumps({"root": "LIBRARY"}))
+
+        self.assertIn("unknown configuration key 'root'", str(caught.exception))
+
+    def test_malformed_json_reports_line_and_column(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config('{"root_entity": ')
+
+        self.assertIn("invalid JSON at line 1", str(caught.exception))
+
+    def test_duplicate_key_is_an_error(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config(
+                '{"root_entity": "LIBRARY", "root_entity": "MEMBER"}'
+            )
+
+        self.assertIn("duplicate key 'root_entity'", str(caught.exception))
+
+    def test_configuration_must_be_a_json_object(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config("[]")
+
+        self.assertIn("must be a JSON object", str(caught.exception))
+
+    def test_entity_names_must_be_an_object(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config(json.dumps({"entity_names": []}))
+
+        self.assertIn("entity_names must be a JSON object", str(caught.exception))
+
+    def test_relationship_names_values_must_be_objects(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config(
+                json.dumps({"relationship_names": {"LIBRARY": "books"}})
+            )
+
+        self.assertIn("relationship_names['LIBRARY']", str(caught.exception))
+
+    def test_names_must_be_identifiers(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config(
+                json.dumps({"entity_names": {"LIBRARY": "Library Card"}})
+            )
+
+        self.assertIn("entity_names['LIBRARY']", str(caught.exception))
+        self.assertIn("must be an identifier", str(caught.exception))
+
+    def test_non_string_root_is_an_error(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config(json.dumps({"root_entity": 3}))
+
+        self.assertIn("root_entity must be an identifier", str(caught.exception))
+
+    def test_entity_names_entry_must_match_a_class(self):
+        config = generator.parse_config(
+            json.dumps({"entity_names": {"CATALOGUE": "Catalogue"}})
+        )
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertIn("unknown class 'CATALOGUE'", str(caught.exception))
+
+    def test_relationship_names_entry_must_match_a_relationship(self):
+        config = generator.parse_config(
+            json.dumps({"relationship_names": {"LIBRARY": {"MEMBER": "members"}}})
+        )
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertIn("matches no relationship", str(caught.exception))
+
+    def test_relationship_names_child_must_be_a_class(self):
+        config = generator.parse_config(
+            json.dumps({"relationship_names": {"LIBRARY": {"GHOST": "ghosts"}}})
+        )
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertIn("unknown class 'GHOST'", str(caught.exception))
+
+    def test_unknown_root_entity_is_an_error(self):
+        config = generator.parse_config(json.dumps({"root_entity": "CATALOGUE"}))
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertIn("root_entity 'CATALOGUE'", str(caught.exception))
+
+    def test_configured_entity_collision_is_an_error(self):
+        config = generator.parse_config(
+            json.dumps({"entity_names": {"BOOK": "Shelf"}})
+        )
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertIn("both map to entity name 'Shelf'", str(caught.exception))
+
+    def test_derived_entity_collision_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class A_B {\n  a : string\n}\n"
+            "class A__B {\n  b : string\n}\n"
             "@enduml\n"
         )
 
         with self.assertRaises(PumlError) as caught:
             build_schema(parse_text(text))
 
-        self.assertIn("LIBRARY -> MEMBER", str(caught.exception))
+        self.assertIn("both map to entity name 'AB'", str(caught.exception))
+
+    def test_configured_relationship_collision_is_an_error(self):
+        config = generator.parse_config(
+            json.dumps(
+                {"relationship_names": {"LIBRARY": {"SHELF": "items", "BOOK": "items"}}}
+            )
+        )
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(parse_text(MODEL_PATH.read_text(encoding="utf-8")), config)
+
+        self.assertIn("property 'items'", str(caught.exception))
+
+    def test_attribute_and_relationship_collision_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  books : string\n}\n"
+            "class BOOK {\n  isbn : string\n}\n"
+            "LIBRARY ||--o{ BOOK : holds\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(PumlError) as caught:
+            build_schema(parse_text(text))
+
+        self.assertIn("property 'books'", str(caught.exception))
+        self.assertIn("attribute 'books'", str(caught.exception))
+
+    def test_duplicate_relationship_is_an_error(self):
+        text = (
+            "@startuml\n"
+            "class LIBRARY {\n  a : string\n}\n"
+            "class BOOK {\n  isbn : string\n}\n"
+            "LIBRARY ||--o{ BOOK : holds\n"
+            "LIBRARY ||--o{ BOOK : holds\n"
+            "@enduml\n"
+        )
+
+        with self.assertRaises(PumlError) as caught:
+            build_schema(parse_text(text))
+
+        self.assertIn("property 'books'", str(caught.exception))
 
 
 class EmissionTests(unittest.TestCase):
@@ -645,6 +844,104 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
         self.assertNotEqual(rejected.returncode, 0)
+
+
+    def test_config_file_reproduces_the_default_output(self):
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(CONFIG_PATH),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(output.read_bytes(), GOLDEN_PATH.read_bytes())
+
+    def test_config_file_changes_the_root_and_entity_names(self):
+        config = self.dir / "config.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "root_entity": "MEMBER",
+                    "entity_names": {"MEMBER": "Borrower"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(config),
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        schema = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(schema["$ref"], "#/$defs/Borrower")
+        self.assertIn("Borrower", schema["$defs"])
+
+    def test_missing_config_file_reports_one_line(self):
+        missing = self.dir / "missing.json"
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(missing),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(str(missing), result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1)
+        self.assertFalse(output.exists())
+
+    def test_malformed_config_file_reports_one_line(self):
+        config = self.dir / "config.json"
+        config.write_text('{"root_entity": ', encoding="utf-8")
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(config),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(f"{config}: invalid JSON at line 1", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1)
+        self.assertFalse(output.exists())
+
+    def test_config_error_names_the_config_file(self):
+        config = self.dir / "config.json"
+        config.write_text(
+            json.dumps({"entity_names": {"GHOST": "Ghost"}}), encoding="utf-8"
+        )
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(config),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(f"{config}: entity_names refers to unknown class 'GHOST'", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(output.exists())
 
 
 class DeterminismTests(unittest.TestCase):
