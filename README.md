@@ -92,6 +92,26 @@ ends in `o|` or `||` becomes a single `$ref`. A property appears in `required`
 only when both ends of the relationship are `||`, so `required` lists the
 relationships the model marks as mandatory and nothing else.
 
+### Foreign keys
+
+An `<<FK>>` attribute disappears when containment already carries the
+relationship. The generator treats the FK target as the one class whose `<<PK>>`
+has the same attribute name. It drops the attribute when that class sits above
+the declaring class on every containment path from the root.
+
+The attribute stays a plain property whenever the rule cannot prove redundancy.
+That covers a sibling reference, a target above only on another path of a shared
+definition, an ambiguous target, and an attribute with no matching `<<PK>>`.
+Keeping it is deliberate, because dropping it would lose the link.
+
+In `example-model.puml` the root is `Library`. `Book` is above `Loan` on the only
+path, so `Loan.isbn` is dropped. `Member` is outside that containment tree, so
+`Loan.memberId` stays.
+
+The rule needs the root class to exist in the model. Without `--config` the root
+is `Library` when the model declares it. A model with no `LIBRARY` class has no
+containment tree, so every FK stays. Set `root_entity` for any other root.
+
 Types map as follows:
 
 | PlantUML   | JSON Schema                                 |
@@ -337,7 +357,8 @@ left out to keep the example short.
 `Member` and `Book` each carry a `loans` array, so both directions of the
 many-to-many are navigable. `Loan` holds `memberId` and `isbn` as plain string
 properties, because the generator emits the reference on the parent side of each
-relationship. The intersecting class carries the foreign keys itself.
+relationship. The intersecting class carries the foreign keys itself. Neither
+target is above `Loan` in this model, so the FK rule keeps both.
 
 ## The supported PlantUML subset
 
@@ -378,8 +399,10 @@ override entry.
 `root_entity` names the entity that the top-level `$ref` points at, so changing
 the entry point needs no constant edit.
 
-`PK` and `FK` markers are accepted and then ignored. They do not change the
-emitted property, and they do not add or remove anything from `required`.
+`PK` and `FK` markers do not change a property's schema on their own. A
+`<<FK>>` that points at an entity above the holder on every containment path is
+dropped, as described in [Foreign keys](#foreign-keys). A `<<PK>>` stays a plain
+property, and neither marker affects `required`.
 
 ## Command line contract
 
@@ -412,9 +435,10 @@ which would otherwise break the byte comparison on Windows.
 python -m unittest -v
 ```
 
-The suite runs 80 tests. It covers the parser errors, the emission shapes, and
+The suite runs 88 tests. It covers the parser errors, the emission shapes, and
 the example model against the golden fixture. It also covers the configuration
-overrides and their errors, the command line contract, and determinism.
+overrides and their errors, the foreign-key rule, the command line contract, and
+determinism.
 
 ## Layout
 

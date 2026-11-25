@@ -327,6 +327,84 @@ def _check_containment_cycles(
             visit(name)
 
 
+def _redundant_foreign_keys(
+    model: Model, root: str | None
+) -> set[tuple[str, str]]:
+    """Return the (class, attribute) pairs that containment already expresses.
+
+    An ``<<FK>>`` is redundant only when the class it points at sits on every
+    containment path from the root to the class that declares it. Anything the
+    rule cannot prove is a plain property, because dropping it would lose the
+    link: a sibling target, a target above only on another path of a shared
+    definition, an ambiguous target, and an unknown target all stay.
+    """
+    dominators = _dominators(model, root)
+    pk_owners: dict[str, list[str]] = {}
+    for definition in model.classes.values():
+        for attribute in definition.attributes:
+            if attribute.marker == "PK":
+                pk_owners.setdefault(attribute.name, []).append(definition.name)
+
+    redundant: set[tuple[str, str]] = set()
+    for definition in model.classes.values():
+        above = dominators.get(definition.name, set())
+        for attribute in definition.attributes:
+            if attribute.marker != "FK":
+                continue
+            owners = pk_owners.get(attribute.name, [])
+            if (
+                len(owners) == 1
+                and owners[0] != definition.name
+                and owners[0] in above
+            ):
+                redundant.add((definition.name, attribute.name))
+    return redundant
+
+
+def _dominators(model: Model, root: str | None) -> dict[str, set[str]]:
+    """Map each class reachable from the root to the classes on every path.
+
+    The root dominates itself. A class outside the root's containment tree has
+    no entry, so nothing in it counts as redundant.
+    """
+    if root is None or root not in model.classes:
+        return {}
+
+    children: dict[str, set[str]] = {name: set() for name in model.classes}
+    parents: dict[str, set[str]] = {name: set() for name in model.classes}
+    for relationship in model.relationships:
+        children[relationship.parent].add(relationship.child)
+        parents[relationship.child].add(relationship.parent)
+
+    reachable: set[str] = set()
+    pending = [root]
+    while pending:
+        name = pending.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        pending.extend(children[name])
+
+    dominators = {name: set(reachable) for name in reachable}
+    dominators[root] = {root}
+    changed = True
+    while changed:
+        changed = False
+        for name in reachable - {root}:
+            incoming = parents[name] & reachable
+            shared = (
+                set.intersection(*(dominators[p] for p in incoming))
+                if incoming
+                else set()
+            )
+            updated = shared | {name}
+            if updated != dominators[name]:
+                dominators[name] = updated
+                changed = True
+
+    return dominators
+
+
 def build_schema(model: Model, config: Config | None = None) -> dict:
     """Turn the parsed model into a JSON Schema document.
 
@@ -339,6 +417,11 @@ def build_schema(model: Model, config: Config | None = None) -> dict:
 
     entity_names = _resolve_entity_names(model, config)
     root_entity = _resolve_root(model, config, entity_names)
+    root_class = next(
+        (name for name, entity in entity_names.items() if entity == root_entity),
+        None,
+    )
+    hidden = _redundant_foreign_keys(model, root_class)
 
     relationships_by_parent: dict[str, list[Relationship]] = {}
     for relationship in model.relationships:
@@ -349,6 +432,8 @@ def build_schema(model: Model, config: Config | None = None) -> dict:
         properties: dict[str, dict] = {}
         origins: dict[str, str] = {}
         for attribute in definition.attributes:
+            if (definition.name, attribute.name) in hidden:
+                continue
             property_name = _lower_first(attribute.name)
             origins[property_name] = f"attribute '{attribute.name}'"
             properties[property_name] = dict(TYPE_MAP[attribute.puml_type])
