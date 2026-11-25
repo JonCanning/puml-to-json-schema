@@ -4,8 +4,9 @@
 The PlantUML model is the input. An optional JSON configuration file supplies
 the root class and explicit entity and relationship names. The generator parses
 the small subset of PlantUML that the example model uses and emits a draft
-2020-12 schema that describes the shape of the root entity. It deliberately
-emits no validation keywords: value constraints belong to the API layer.
+2020-12 schema that describes the shape of the root entity. Foreign keys that
+containment already expresses are omitted. It deliberately emits no validation
+keywords: value constraints belong to the API layer.
 """
 
 from __future__ import annotations
@@ -19,8 +20,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
-
-ROOT_ENTITY = "Library"
 
 TYPE_MAP = {
     "string": {"type": "string"},
@@ -42,6 +41,10 @@ ENTITY_NAMES = {
     "LOAN": "Loan",
     "FINE": "Fine",
 }
+
+# The last-resort root entity. Every parsed model has a resolvable root, so this
+# only covers a hand-built model with a containment cycle.
+ROOT_ENTITY = ENTITY_NAMES["LIBRARY"]
 
 RELATIONSHIP_NAMES = {
     ("LIBRARY", "SHELF"): "shelves",
@@ -235,6 +238,8 @@ def parse_puml(text: str) -> Model:
         raise PumlError("missing @startuml", 1)
     if not ended:
         raise PumlError("missing @enduml", max(len(lines), 1))
+    if not classes:
+        raise PumlError("the model declares no classes", 1)
 
     _validate_endpoints(classes, relationships)
     _check_containment_cycles(classes, relationships)
@@ -352,11 +357,7 @@ def _redundant_foreign_keys(
             if attribute.marker != "FK":
                 continue
             owners = pk_owners.get(attribute.name, [])
-            if (
-                len(owners) == 1
-                and owners[0] != definition.name
-                and owners[0] in above
-            ):
+            if len(owners) == 1 and owners[0] in above:
                 redundant.add((definition.name, attribute.name))
     return redundant
 
@@ -416,11 +417,7 @@ def build_schema(model: Model, config: Config | None = None) -> dict:
         _validate_config(model, config)
 
     entity_names = _resolve_entity_names(model, config)
-    root_entity = _resolve_root(model, config, entity_names)
-    root_class = next(
-        (name for name, entity in entity_names.items() if entity == root_entity),
-        None,
-    )
+    root_class, root_entity = _resolve_root(model, config, entity_names)
     hidden = _redundant_foreign_keys(model, root_class)
 
     relationships_by_parent: dict[str, list[Relationship]] = {}
@@ -503,6 +500,8 @@ def parse_config(text: str) -> Config:
         raise ConfigError(
             f"invalid JSON at line {error.lineno} column {error.colno}: {error.msg}"
         )
+    except RecursionError:
+        raise ConfigError("configuration is nested too deeply")
     if not isinstance(raw, dict):
         raise ConfigError("configuration must be a JSON object")
 
@@ -564,6 +563,15 @@ def _config_name(value: object, where: str) -> str:
 
 def _validate_config(model: Model, config: Config) -> None:
     declared = set(model.classes)
+
+    # A Config built by hand skips parse_config, so check the names here too.
+    if config.root_entity is not None:
+        _config_name(config.root_entity, "root_entity")
+    for class_name, entity_name in config.entity_names.items():
+        _config_name(entity_name, f"entity_names['{class_name}']")
+    for (parent, child), property_name in config.relationship_names.items():
+        _config_name(property_name, f"relationship_names['{parent}']['{child}']")
+
     for class_name in config.entity_names:
         if class_name not in declared:
             raise ConfigError(
@@ -633,23 +641,34 @@ def _resolve_entity_names(
 
 def _resolve_root(
     model: Model, config: Config | None, entity_names: dict[str, str]
-) -> str:
+) -> tuple[str | None, str]:
+    """Return the root class name and the root entity name.
+
+    A configured root wins. Otherwise ``LIBRARY`` is the root when the model
+    declares it, then the first class declared with no incoming relationship,
+    so the top-level ``$ref`` always resolves for a parsed model.
+    """
     if config is not None and config.root_entity is not None:
-        if config.root_entity in model.classes:
-            return entity_names[config.root_entity]
-        if config.root_entity in entity_names.values():
-            return config.root_entity
+        requested = config.root_entity
+        if requested in model.classes:
+            return requested, entity_names[requested]
+        for name, entity in entity_names.items():
+            if entity == requested:
+                return name, entity
         raise ConfigError(
-            f"root_entity '{config.root_entity}' is not a class or entity name "
+            f"root_entity '{requested}' is not a class or entity name "
             f"in the model; the model declares: {_class_list(model)}"
         )
 
-    # The example model's root is the historical default. A model without a
-    # LIBRARY class keeps the legacy root, which the README lists as a known
-    # limitation.
     if "LIBRARY" in model.classes:
-        return entity_names["LIBRARY"]
-    return ROOT_ENTITY
+        return "LIBRARY", entity_names["LIBRARY"]
+
+    children = {relationship.child for relationship in model.relationships}
+    for name in model.classes:
+        if name not in children:
+            return name, entity_names[name]
+
+    return None, ROOT_ENTITY
 
 
 def _default_entity_name(class_name: str) -> str:
@@ -737,6 +756,9 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = Path(args.input)
     output_path = Path(args.output)
+
+    if args.config is not None and _same_path(Path(args.config), output_path):
+        return _fail(f"refusing to overwrite the config file: {args.output}")
 
     config: Config | None = None
     if args.config is not None:

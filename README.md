@@ -56,7 +56,9 @@ each `$ref` that points at it. `Member.loans` becomes `Borrower.activeLoans`.
 All three keys are optional:
 
 - `root_entity` names the class whose entity the top-level `$ref` points at. It
-  may also name an entity. When omitted, the `LIBRARY` class is the root.
+  may also name an entity. When omitted, `LIBRARY` is the root if the model
+  declares it. Otherwise the root is the first class declared with no incoming
+  relationship.
 - `entity_names` maps a class name to the name used in `$defs`.
 - `relationship_names` maps a parent class and child class to the property name
   that carries the reference. It uses both class names as the key, because one
@@ -102,15 +104,18 @@ the declaring class on every containment path from the root.
 The attribute stays a plain property whenever the rule cannot prove redundancy.
 That covers a sibling reference, a target above only on another path of a shared
 definition, an ambiguous target, and an attribute with no matching `<<PK>>`.
-Keeping it is deliberate, because dropping it would lose the link.
+Keeping it is deliberate, because dropping it would lose the link. A misspelled
+FK name therefore keeps the property.
 
-In `example-model.puml` the root is `Library`. `Book` is above `Loan` on the only
+In `example-model.puml` the root is `Library`. `Book` is above `Loan` on every
 path, so `Loan.isbn` is dropped. `Member` is outside that containment tree, so
 `Loan.memberId` stays.
 
-The rule needs the root class to exist in the model. Without `--config` the root
-is `Library` when the model declares it. A model with no `LIBRARY` class has no
-containment tree, so every FK stays. Set `root_entity` for any other root.
+The containment tree starts at the root described in
+[Configure the model mappings](#configure-the-model-mappings): `LIBRARY` when
+declared, otherwise the first class declared with no incoming relationship.
+Only the root's subtree describes instances, so generate with another
+`root_entity` for a document rooted elsewhere.
 
 Types map as follows:
 
@@ -262,8 +267,8 @@ LOAN ||--|| FINE : incurs
 ```
 
 `LIBRARY` takes no part in the relationship. It is declared so the top-level
-`$ref` resolves, because the generator always points the document at the entity
-named by `ROOT_ENTITY`.
+`$ref` resolves, because the document points at the `LIBRARY` class by default.
+Set `root_entity` to choose another root.
 
 ### Many to many through an intersecting class
 
@@ -396,8 +401,8 @@ The generator emits a property only on the parent side of a relationship. A
 navigable reverse direction needs its own declared relationship and its own
 override entry.
 
-`root_entity` names the entity that the top-level `$ref` points at, so changing
-the entry point needs no constant edit.
+`root_entity` selects the entity that the top-level `$ref` points at, so
+changing the entry point needs no constant edit.
 
 `PK` and `FK` markers do not change a property's schema on their own. A
 `<<FK>>` that points at an entity above the holder on every containment path is
@@ -435,7 +440,7 @@ which would otherwise break the byte comparison on Windows.
 python -m unittest -v
 ```
 
-The suite runs 88 tests. It covers the parser errors, the emission shapes, and
+The suite runs 96 tests. It covers the parser errors, the emission shapes, and
 the example model against the golden fixture. It also covers the configuration
 overrides and their errors, the foreign-key rule, the command line contract, and
 determinism.
@@ -456,6 +461,4 @@ test_puml_to_json_schema.py        the tests
 These are defects in the current generator rather than intended behaviour:
 
 - A left-hand `o{` is validated and then ignored, so write relationships from the parent to the child.
-- Without `--config`, a model with no `LIBRARY` class emits a top-level `$ref`
-  that cannot resolve.
 - An output path that is a hardlink to the input is not recognised as the same file, so the input is overwritten.

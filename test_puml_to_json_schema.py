@@ -1,8 +1,8 @@
 """Tests for the PlantUML to JSON Schema generator.
 
-The tests are organised by the four things the generator must get right:
-parsing (including every required error), emission shape, the full library
-model, and the command line contract.
+The tests are organised by what the generator must get right: parsing
+(including every required error), emission shape, the naming configuration,
+the foreign-key rule, the full library model, and the command line contract.
 """
 
 import json
@@ -21,6 +21,7 @@ MODEL_PATH = ROOT / "example-model.puml"
 CONFIG_PATH = ROOT / "example-config.json"
 FIXTURES = ROOT / "tests" / "fixtures"
 GOLDEN_PATH = FIXTURES / "example.schema.golden.json"
+GENERATED_PATH = ROOT / "generated" / "example.schema.json"
 SCRIPT = ROOT / "puml_to_json_schema.py"
 
 EXPECTED_ENTITIES = {
@@ -254,6 +255,13 @@ class ParserTests(unittest.TestCase):
 
         self.assertIn("@enduml", str(caught.exception))
 
+    def test_model_without_classes_is_an_error(self):
+        with self.assertRaises(PumlError) as caught:
+            parse_text("@startuml\n@enduml\n")
+
+        self.assertEqual(caught.exception.line, 1)
+        self.assertIn("no classes", str(caught.exception))
+
     def test_unknown_attribute_type_is_an_error(self):
         with self.assertRaises(PumlError) as caught:
             parse_text(read_fixture("schema-unknown-type.puml"))
@@ -331,6 +339,36 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(schema["$ref"], "#/$defs/Loan")
 
+    def test_non_library_model_gets_a_resolvable_root(self):
+        text = (
+            "@startuml\n"
+            "class CLAIM {\n  * claimNumber : string <<PK>>\n}\n"
+            "class PARTY {\n"
+            "  * partyId : string <<PK>>\n"
+            "  claimNumber : string <<FK>>\n"
+            "}\n"
+            "CLAIM ||--o{ PARTY : hasParties\n"
+            "@enduml\n"
+        )
+
+        schema = schema_for(text)
+
+        self.assertEqual(schema["$ref"], "#/$defs/Claim")
+        self.assertIn("Claim", schema["$defs"])
+        self.assertNotIn("claimNumber", schema["$defs"]["Party"]["properties"])
+
+    def test_first_declared_source_is_the_default_root(self):
+        text = (
+            "@startuml\n"
+            "class ZED {\n  * zId : string <<PK>>\n}\n"
+            "class ALPHA {\n  * aId : string <<PK>>\n}\n"
+            "@enduml\n"
+        )
+
+        schema = schema_for(text)
+
+        self.assertEqual(schema["$ref"], "#/$defs/Zed")
+
     def test_unknown_top_level_key_is_an_error(self):
         with self.assertRaises(ConfigError) as caught:
             generator.parse_config(json.dumps({"root": "LIBRARY"}))
@@ -385,6 +423,23 @@ class ConfigTests(unittest.TestCase):
             generator.parse_config(json.dumps({"root_entity": 3}))
 
         self.assertIn("root_entity must be an identifier", str(caught.exception))
+
+    def test_programmatic_config_names_are_validated(self):
+        model = parse_text(MODEL_PATH.read_text(encoding="utf-8"))
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(model, generator.Config(entity_names={"BOOK": "a/b"}))
+        self.assertIn("entity_names['BOOK']", str(caught.exception))
+
+        with self.assertRaises(ConfigError) as caught:
+            build_schema(model, generator.Config(root_entity="1BAD"))
+        self.assertIn("root_entity must be an identifier", str(caught.exception))
+
+    def test_deeply_nested_config_is_an_error(self):
+        with self.assertRaises(ConfigError) as caught:
+            generator.parse_config("[" * 10000)
+
+        self.assertIn("nested too deeply", str(caught.exception))
 
     def test_entity_names_entry_must_match_a_class(self):
         config = generator.parse_config(
@@ -802,6 +857,9 @@ class FullModelTests(unittest.TestCase):
             GOLDEN_PATH.read_bytes(),
         )
 
+    def test_tracked_generated_example_matches_golden(self):
+        self.assertEqual(GENERATED_PATH.read_bytes(), GOLDEN_PATH.read_bytes())
+
     def test_top_level_document_is_a_library_ref(self):
         self.assertEqual(
             self.schema["$schema"],
@@ -1093,6 +1151,43 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn(f"{config}: entity_names refers to unknown class 'GHOST'", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
+        self.assertFalse(output.exists())
+
+    def test_output_equal_to_config_is_refused(self):
+        config = self.dir / "config.json"
+        config.write_bytes(CONFIG_PATH.read_bytes())
+        before = config.read_bytes()
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(config),
+            "--config",
+            str(config),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("config file", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_deeply_nested_config_file_reports_one_line(self):
+        config = self.dir / "config.json"
+        config.write_text("[" * 10000, encoding="utf-8")
+        output = self.dir / "out.json"
+
+        result = run_cli(
+            str(MODEL_PATH),
+            "--output",
+            str(output),
+            "--config",
+            str(config),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("nested too deeply", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        self.assertEqual(len(result.stderr.strip().splitlines()), 1)
         self.assertFalse(output.exists())
 
 
