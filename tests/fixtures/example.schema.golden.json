@@ -89,9 +89,6 @@
         "memberId": {
           "type": "string"
         },
-        "isbn": {
-          "type": "string"
-        },
         "borrowedAt": {
           "type": "string",
           "format": "date-time"
